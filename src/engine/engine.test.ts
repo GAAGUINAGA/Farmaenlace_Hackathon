@@ -5,7 +5,6 @@ import {
   CUSTOMERS,
   EXISTING_RECOMMENDATIONS,
   FLOOR_CENTS,
-  INITIAL_BASKET,
   INITIAL_STOCK,
   PRODUCTS,
   PROMOTIONS,
@@ -15,6 +14,7 @@ import { decide, revalidate } from "./decide";
 import type { BasketLine, Campaign, EngineInput, Objective, Promotion } from "./types";
 
 const NOW = "2026-10-08T12:00:00.000Z";
+const CREMA: BasketLine[] = [{ sku: "sku-crema", quantity: 1 }];
 const stock = () => Object.fromEntries(PRODUCTS.map((p) => [p.sku, INITIAL_STOCK]));
 
 function input(
@@ -33,7 +33,7 @@ function input(
   const rec = EXISTING_RECOMMENDATIONS.find((r) => r.customer_id === customerId)!;
   return {
     customer,
-    basket: opts.basket ?? INITIAL_BASKET,
+    basket: opts.basket ?? CREMA,
     campaign: {
       ...CAMPAIGN,
       objective: opts.objective ?? "ganar_participacion",
@@ -73,7 +73,7 @@ describe("score: casos de verificación de la sección 4 (canasta inicial: 1 cre
     expect(decide(i).winner?.label).toBe("A");
   });
   it("C excluida por membresía para Rosa y Luis (con jabón en canasta y en sus recomendaciones)", () => {
-    const basket = [...INITIAL_BASKET, { sku: "sku-jabon", quantity: 1 }];
+    const basket = [...CREMA, { sku: "sku-jabon", quantity: 1 }];
     for (const id of ["c-rosa", "c-luis"]) {
       const d = decide(input(id, { basket, extraSkus: ["sku-jabon"] }));
       expect(d.ranking.map((r) => r.label)).not.toContain("C");
@@ -97,7 +97,9 @@ describe("score: casos de verificación de la sección 4 (canasta inicial: 1 cre
 
 describe("filtros duros", () => {
   it("B sin stock se descarta con motivo y Luis cae a A", () => {
-    const d = decide(input("c-luis", { stock: { ...stock(), "sku-champu": 0 } }));
+    const bSkus = PROMOTIONS.find((p) => p.id === "promo-B")!.items.map((i) => i.sku);
+    const noB = { ...stock(), ...Object.fromEntries(bSkus.map((sku) => [sku, 0])) };
+    const d = decide(input("c-luis", { stock: noB }));
     expect(d.discarded).toEqual([expect.objectContaining({ label: "B", code: "out_of_stock" })]);
     expect(d.winner?.label).toBe("A");
   });
@@ -135,8 +137,9 @@ describe("filtros duros", () => {
     expect(b.discarded.every((x) => x.code === "campaign_expired")).toBe(true);
   });
   it("piso económico bloquea la oferta pese a la afinidad", () => {
-    // Con piso 250, A (200) queda bloqueada aunque Rosa tenga la mayor afinidad; B (300) pasa.
-    const d = decide(input("c-rosa", { floor: 250 }));
+    // Con piso 260, ningún producto de A (máx. 250) alcanza el piso aunque Rosa tenga la mayor
+    // afinidad; B tiene el champú (300) y pasa.
+    const d = decide(input("c-rosa", { floor: 260 }));
     expect(d.discarded).toEqual([expect.objectContaining({ label: "A", code: "below_floor" })]);
     expect(d.winner?.label).toBe("B");
   });
@@ -151,9 +154,20 @@ describe("filtros duros", () => {
     const d = decide(input("c-rosa"));
     expect(d.score_type).toBe("configured_rules");
     expect(d.rules_version).toBe("v1");
-    expect(d.winner?.price_before_cents).toBe(1200);
-    expect(d.winner?.price_after_cents).toBe(1000);
-    expect(d.winner?.contribution_cents).toBe(200);
+    const crema = d.winner?.items.find((i) => i.sku === "sku-crema");
+    expect(crema).toMatchObject({
+      price_before_cents: 1200,
+      price_after_cents: 1000,
+      contribution_cents: 200,
+      in_basket: true,
+    });
+    expect(d.winner?.items).toHaveLength(4);
+  });
+  it("la promoción cubre varios productos y solo se aplica a los que pasan stock y piso", () => {
+    // Sin stock de crema y con piso 250: de A solo queda la loción (contribución 250).
+    const d = decide(input("c-rosa", { floor: 250, stock: { ...stock(), "sku-crema": 0 } }));
+    const a = d.ranking.find((r) => r.label === "A");
+    expect(a?.items.map((i) => i.sku)).toEqual(["sku-locion"]);
   });
 });
 
@@ -168,21 +182,27 @@ describe("desempate y revalidación", () => {
     expect(d.ranking.map((r) => r.label)).toEqual(["B", "A"]);
     // Misma contribución: gana el menor ID.
     const promos = PROMOTIONS.map((p) =>
-      p.id === "promo-A" ? { ...p, promo_price_cents: 1100 } : p,
+      p.id === "promo-A"
+        ? {
+            ...p,
+            items: p.items.map((i) =>
+              i.sku === "sku-crema" ? { ...i, promo_price_cents: 1100 } : i,
+            ),
+          }
+        : p,
     );
-    const products = PRODUCTS.map((p) => (p.sku === "sku-crema" ? { ...p, cost_cents: 800 } : p));
-    const tie = decide({
-      ...input("c-rosa", { campaign, basket: [], promotions: promos }),
-      products,
-    });
+    const tie = decide(input("c-rosa", { campaign, basket: [], promotions: promos }));
     expect(tie.ranking[0]?.contribution_cents).toBe(tie.ranking[1]?.contribution_cents);
     expect(tie.ranking.map((r) => r.promotion_id)).toEqual(["promo-A", "promo-B"]);
   });
   it("revalidate detecta stock agotado y vencimiento después de recomendar", () => {
     expect(revalidate(input("c-rosa"), "promo-A")).toBeNull();
     expect(
-      revalidate(input("c-rosa", { stock: { ...stock(), "sku-crema": 0 } }), "promo-A")?.code,
-    ).toBe("out_of_stock");
+      revalidate(input("c-rosa", { stock: { ...stock(), "sku-crema": 0 } }), "promo-A"),
+    ).toBeNull(); // la promoción sigue vigente en sus otros productos
+    const aSkus = PROMOTIONS.find((p) => p.id === "promo-A")!.items.map((i) => i.sku);
+    const noA = { ...stock(), ...Object.fromEntries(aSkus.map((sku) => [sku, 0])) };
+    expect(revalidate(input("c-rosa", { stock: noA }), "promo-A")?.code).toBe("out_of_stock");
   });
   it("cambiar prioridad cambia la acción por una razón observable", () => {
     const campaign: Partial<Campaign> = {

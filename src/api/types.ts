@@ -5,12 +5,15 @@ import type {
   DemoEvent,
   Discard,
   ExistingRecommendation,
+  Family,
   Objective,
   Product,
   Promotion,
   PromotionStatus,
   Ranked,
+  RankedItem,
   ResultRow,
+  Verdict,
   Segment,
   TransactionRecord,
 } from "@/engine";
@@ -25,7 +28,17 @@ export type {
   Promotion,
   PromotionStatus,
 };
-export type { Ranked, ResultRow, Segment, TransactionRecord, ExistingRecommendation };
+export type {
+  Ranked,
+  RankedItem,
+  ResultRow,
+  Segment,
+  TransactionRecord,
+  ExistingRecommendation,
+  Family,
+  Verdict,
+};
+export type { AppliedItem } from "@/engine";
 export type { DemoEvent };
 
 export class ApiError extends Error {
@@ -61,6 +74,9 @@ export type RecommendResponse = {
   price_after_cents: number | null;
   contribution_cents: number | null;
   rules_version: string;
+  /** Productos donde se aplica la promoción (con precio antes y después). */
+  items: RankedItem[];
+  family: Family | null;
   // Extensiones del MVP (no están en el contrato mínimo).
   campaign_version: number;
   objective: Objective;
@@ -139,6 +155,7 @@ export type DemoData = {
 export type ResultsResponse = {
   generated_at: string;
   rows: ResultRow[];
+  overall: Verdict;
   events: DemoEvent[];
   transactions: TransactionRecord[];
   notices: string[];

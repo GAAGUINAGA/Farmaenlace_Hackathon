@@ -1,9 +1,17 @@
 import { Link } from "@tanstack/react-router";
-import { AlertTriangle, FlaskConical, Info, RotateCcw, ShoppingCart } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FlaskConical,
+  Hourglass,
+  Info,
+  RotateCcw,
+  ShoppingCart,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { api, formatCents, type ResultRow, type ResultsResponse } from "@/api";
+import { api, formatCents, type ResultRow, type ResultsResponse, type Verdict } from "@/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,6 +51,48 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 
 const pct = (rate: number | null) => (rate === null ? NO_OBS : `${Math.round(rate * 100)} %`);
 
+const VERDICT_TITLES: Record<Verdict["status"], string> = {
+  funciona: "La campaña está funcionando",
+  falla: "La campaña falló",
+  en_observacion: "Campaña en observación",
+  sin_observaciones: "Sin observaciones",
+};
+
+/** Verde si funciona, advertencia si falla, neutro mientras faltan observaciones. */
+function VerdictBanner({ verdict, compact = false }: { verdict: Verdict; compact?: boolean }) {
+  const tone =
+    verdict.status === "funciona"
+      ? "border-success/60 bg-success/10 text-success"
+      : verdict.status === "falla"
+        ? "border-destructive/60 bg-danger-soft text-destructive"
+        : "border-border bg-muted/60 text-foreground";
+  const Icon =
+    verdict.status === "funciona"
+      ? CheckCircle2
+      : verdict.status === "falla"
+        ? AlertTriangle
+        : Hourglass;
+  return (
+    <div
+      role={verdict.status === "falla" ? "alert" : "status"}
+      data-verdict={verdict.status}
+      className={cn(
+        "flex gap-3 rounded-2xl border-2 p-4",
+        tone,
+        compact && "rounded-xl border p-3",
+      )}
+    >
+      <Icon className={cn("mt-0.5 shrink-0", compact ? "h-4 w-4" : "h-6 w-6")} aria-hidden="true" />
+      <div>
+        <p className={cn("font-black", compact ? "text-sm" : "text-lg")}>
+          {VERDICT_TITLES[verdict.status]}
+        </p>
+        <p className={cn("text-foreground", compact ? "text-xs" : "text-sm")}>{verdict.message}</p>
+      </div>
+    </div>
+  );
+}
+
 function AudienceCard({ row }: { row: ResultRow }) {
   return (
     <Card className="grid min-w-0 gap-4 rounded-2xl p-4 shadow-soft sm:p-5">
@@ -57,10 +107,12 @@ function AudienceCard({ row }: { row: ResultRow }) {
           {row.evidence === "sin_observaciones"
             ? "Sin observaciones"
             : row.evidence === "insuficiente"
-              ? "Evidencia insuficiente"
+              ? "Evidencia insuficiente para concluir"
               : "Evidencia mínima, observacional"}
         </Badge>
       </div>
+
+      <VerdictBanner verdict={row.verdict} compact />
 
       <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Recomendaciones" value={String(row.recommendations)} />
@@ -121,6 +173,19 @@ export function ResultsView() {
     void load();
   }, [load]);
 
+  const loadScenario = async (kind: "funciona" | "falla") => {
+    setBusy(true);
+    try {
+      const n = await api.seedScenario(kind);
+      await load();
+      toast.success(`Se generaron ${n} ventas de ejemplo (datos ficticios).`);
+    } catch {
+      toast.error("No se pudo generar el escenario de ejemplo.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reset = async () => {
     setBusy(true);
     await api.resetDemo();
@@ -150,6 +215,8 @@ export function ResultsView() {
         </div>
       </div>
 
+      {res && <VerdictBanner verdict={res.overall} />}
+
       <Alert className="border-primary/40 bg-primary-soft">
         <Info className="h-4 w-4" />
         <AlertTitle>Datos ficticios · observacional · sin evidencia causal</AlertTitle>
@@ -159,6 +226,31 @@ export function ResultsView() {
           y no deben usarse para elegir una promoción ganadora.
         </AlertDescription>
       </Alert>
+
+      <section
+        aria-label="Escenarios de ejemplo"
+        className="flex flex-wrap items-center gap-2 rounded-2xl border border-dashed p-3 text-sm"
+      >
+        <span className="mr-auto text-muted-foreground">
+          ¿Pocas ventas? Genere 9 ventas de ejemplo (datos ficticios) para ver cada lectura:
+        </span>
+        <Button
+          variant="outline"
+          className="h-10"
+          disabled={busy}
+          onClick={() => loadScenario("funciona")}
+        >
+          Ejemplo: campaña que funciona
+        </Button>
+        <Button
+          variant="outline"
+          className="h-10"
+          disabled={busy}
+          onClick={() => loadScenario("falla")}
+        >
+          Ejemplo: campaña que falla
+        </Button>
+      </section>
 
       {error && (
         <Alert variant="destructive">

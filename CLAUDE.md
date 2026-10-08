@@ -14,7 +14,7 @@ Fuente de verdad: docs/especificacion.md. Si algo no está ahí, pregunta; no lo
 - Banner visible: "Datos ficticios · prototipo · motor de reglas simulado".
 - La UI muestra solo lo que devuelve la API. Nunca inventes descuentos, precios ni mensajes.
 - No afirmar aumento de participación de mercado ni rentabilidad.
-- No recomendar tratamientos ni inferir enfermedades. Sin cédulas; IDs ficticios.
+- No recomendar tratamientos ni inferir enfermedades. IDs internos ficticios (c-rosa…). La demo pide una cédula solo para simular el POS: únicamente cédulas FICTICIAS de demostración (0900000001…), nunca reales, y nunca como clave interna ni en los eventos.
 - Dinero en centavos (enteros). UI en español.
 - Aceptar verbalmente no es comprar; "no presentada" no es rechazo.
 - Reutiliza los componentes y el estilo existentes antes de crear otros nuevos.

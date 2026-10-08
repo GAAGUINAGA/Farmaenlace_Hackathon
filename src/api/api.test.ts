@@ -5,6 +5,11 @@ import { ApiError, createApi, createMemoryStorage, type Api } from "./index";
 const STORE = "s-01";
 const CAMPAIGN = "camp-01";
 const CREMA = [{ sku: "sku-crema", quantity: 1 }];
+const A_SKUS = ["sku-crema", "sku-locion", "sku-balsamo", "sku-mascarilla"];
+const B_SKUS = ["sku-champu", "sku-desodorante", "sku-pasta", "sku-toallas"];
+const soldOut = async (skus: string[]) => {
+  for (const sku of skus) await api.setStock(sku, 0);
+};
 let api: Api;
 let n: number;
 
@@ -63,14 +68,13 @@ describe("recommend", () => {
   });
   it("Luis recibe B y, sin stock de B, cae a A con B descartada", async () => {
     expect((await rec("c-luis")).promotion_id).toBe("promo-B");
-    await api.setStock("sku-champu", 0);
+    await soldOut(B_SKUS);
     const r = await rec("c-luis");
     expect(r.promotion_id).toBe("promo-A");
     expect(r.discarded).toEqual([expect.objectContaining({ label: "B", code: "out_of_stock" })]);
   });
   it("no_offer devuelve campos nulos y motivo", async () => {
-    await api.setStock("sku-crema", 0);
-    await api.setStock("sku-champu", 0);
+    await soldOut([...A_SKUS, ...B_SKUS]);
     const r = await rec("c-rosa");
     expect(r).toMatchObject({
       decision: "no_offer",
@@ -154,8 +158,14 @@ describe("compra", () => {
       promotion_id: "promo-A",
       contribution_cents: 200,
       total_cents: 1000,
-      added_unit: false,
     });
+    expect(t.transaction.applied).toEqual([
+      expect.objectContaining({
+        sku: "sku-crema",
+        price_before_cents: 1200,
+        price_after_cents: 1000,
+      }),
+    ]);
     expect(t.stock["sku-crema"]).toBe(9);
     const row = (await api.getResults()).rows.find((x) => x.audience === "seg-wellness")!;
     expect(row).toMatchObject({
@@ -166,16 +176,28 @@ describe("compra", () => {
       contribution_cents: 200,
     });
   });
-  it("si el producto promocionado no está en la canasta se agrega 1 unidad a precio promocional", async () => {
-    const r = await rec("c-luis"); // B (champú) con crema en canasta
+  it("la promoción aplica 1 unidad por cada producto cubierto presente en la factura", async () => {
+    const basket = [
+      { sku: "sku-desodorante", quantity: 2 },
+      { sku: "sku-pasta", quantity: 1 },
+    ];
+    const r = await rec("c-luis", basket);
+    expect(r.promotion_id).toBe("promo-B");
+    await ev(r.recommendation_id, "presented");
+    const t = await buy(r.recommendation_id, "c-luis", basket);
+    // Regular: 2×650 + 500 = 1800. Descuento de 1 unidad por producto: 50 + 50.
+    expect(t.transaction.total_cents).toBe(1800 - 100);
+    expect(t.transaction.contribution_cents).toBe(250 + 170);
+    expect(t.transaction.applied.map((i) => i.sku)).toEqual(["sku-desodorante", "sku-pasta"]);
+    expect(t.stock["sku-desodorante"]).toBe(8);
+  });
+  it("si ningún producto de la promoción está en la factura, la compra sigue a precio normal", async () => {
+    const r = await rec("c-luis"); // B por afinidad, pero la factura solo tiene crema
     await ev(r.recommendation_id, "presented");
     const t = await buy(r.recommendation_id, "c-luis");
-    expect(t.transaction).toMatchObject({
-      promotion_id: "promo-B",
-      added_unit: true,
-      total_cents: 1200 + 900,
-    });
-    expect(t.stock["sku-champu"]).toBe(9);
+    expect(t.promotion_applied).toBe(false);
+    expect(t.reason).toMatch(/Ningún producto de la promoción/);
+    expect(t.transaction.total_cents).toBe(1200);
   });
   it("el mismo transaction_id no duplica compra ni descuenta stock dos veces", async () => {
     const r = await rec("c-rosa");
@@ -221,10 +243,11 @@ describe("compra", () => {
     expect(t2.reason).toMatch(/canasta cambió/);
   });
   it("revalida: stock agotado entre recomendar y comprar bloquea la promoción", async () => {
-    const r = await rec("c-luis"); // B
+    const basket = [{ sku: "sku-champu", quantity: 1 }];
+    const r = await rec("c-luis", basket); // B
     await ev(r.recommendation_id, "presented");
-    await api.setStock("sku-champu", 0);
-    const t = await buy(r.recommendation_id, "c-luis");
+    await soldOut(B_SKUS);
+    const t = await buy(r.recommendation_id, "c-luis", basket);
     expect(t.promotion_applied).toBe(false);
     expect(t.reason).toMatch(/Sin stock/);
   });
@@ -283,5 +306,35 @@ describe("resultados", () => {
     const data = await api.getDemoData();
     expect(data.stock["sku-crema"]).toBe(10);
     expect(data.events).toHaveLength(0);
+  });
+});
+
+describe("cédula y escenarios de ejemplo", () => {
+  it("lookupCustomer encuentra las cédulas ficticias y rechaza las desconocidas", async () => {
+    expect((await api.lookupCustomer("090-000-0001")).id).toBe("c-rosa");
+    expect((await api.lookupCustomer("0900000003")).required_family).toBe("membresia");
+    await expect(api.lookupCustomer("1234567890")).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+  it("sin presentaciones, el veredicto de la campaña es «sin observaciones»", async () => {
+    expect((await api.getResults()).overall.status).toBe("sin_observaciones");
+  });
+  it("con pocas presentaciones, el veredicto es «en observación»", async () => {
+    const r = await rec("c-rosa");
+    await ev(r.recommendation_id, "presented");
+    expect((await api.getResults()).overall.status).toBe("en_observacion");
+  });
+  it("escenario «funciona»: la campaña se marca como funcionando", async () => {
+    await api.seedScenario("funciona");
+    const res = await api.getResults();
+    expect(res.overall.status).toBe("funciona");
+    expect(res.overall.message).toMatch(/está funcionando/);
+    expect(res.rows.every((r) => r.verdict.status === "funciona")).toBe(true);
+  });
+  it("escenario «falla»: la campaña se marca como fallida y sugiere otra estrategia", async () => {
+    await api.seedScenario("falla");
+    const res = await api.getResults();
+    expect(res.overall.status).toBe("falla");
+    expect(res.overall.message).toMatch(/falló/);
+    expect(res.overall.message).toMatch(/otra estrategia/);
   });
 });

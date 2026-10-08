@@ -131,31 +131,37 @@ export function CommercialPanel({ pos, data }: { pos: PosDemoState; data: DemoDa
             </section>
 
             <section aria-label="Stock" className="grid gap-2">
-              <h4 className="text-xs font-extrabold uppercase text-muted-foreground">Stock</h4>
-              {data.products.map((p) => {
-                const stock = data.stock[p.sku] ?? 0;
+              <h4 className="text-xs font-extrabold uppercase text-muted-foreground">
+                Stock por promoción
+              </h4>
+              {data.promotions.map((promo) => {
+                const skus = promo.items.map((i) => i.sku);
+                const soldOut = skus.every((sku) => (data.stock[sku] ?? 0) === 0);
                 return (
-                  <div key={p.sku} className="flex items-center justify-between gap-3 text-sm">
+                  <div key={promo.id} className="flex items-center justify-between gap-3 text-sm">
                     <span>
-                      <b>{p.name}</b> <span className="text-muted-foreground">· stock {stock}</span>
+                      <b>Promoción {promo.label}</b>{" "}
+                      <span className="text-muted-foreground">
+                        · {soldOut ? "agotada" : `${skus.length} productos con stock`}
+                      </span>
                     </span>
-                    {stock > 0 ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() => admin.setStock(p.sku, 0)}
-                      >
-                        Agotar
-                      </Button>
-                    ) : (
+                    {soldOut ? (
                       <Button
                         size="sm"
                         variant="secondary"
                         disabled={busy}
-                        onClick={() => admin.setStock(p.sku, 10)}
+                        onClick={() => admin.setStock(skus, 10)}
                       >
                         Reponer a 10
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => admin.setStock(skus, 0)}
+                      >
+                        Agotar stock
                       </Button>
                     )}
                   </div>

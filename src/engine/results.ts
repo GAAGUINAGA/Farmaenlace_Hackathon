@@ -11,8 +11,16 @@ import type {
 
 /** Presentaciones mínimas por brazo para considerar la evidencia: supuesto visible de la demo. */
 export const MIN_PRESENTATIONS = 30;
+/** Lectura preliminar de la demo (supuestos visibles): mínimo de presentaciones y meta de compra. */
+export const VERDICT_MIN_PRESENTATIONS = 3;
+export const VERDICT_TARGET_RATE = 0.5;
 export const UNKNOWN_AUDIENCE = "unknown";
 export const UNKNOWN_AUDIENCE_LABEL = "Afinidad desconocida";
+
+export type Verdict = {
+  status: "sin_observaciones" | "en_observacion" | "funciona" | "falla";
+  message: string;
+};
 
 export type ResultRow = {
   campaign_id: string;
@@ -34,6 +42,7 @@ export type ResultRow = {
   purchase_rate: number | null;
   /** Contribución simulada y observacional de la unidad promocionada; no es beneficio incremental. */
   contribution_cents: number;
+  verdict: Verdict;
   evidence: "sin_observaciones" | "insuficiente" | "minima";
   evidence_note: string;
   proposal: string;
@@ -85,6 +94,41 @@ type ResultsInput = {
 };
 
 const rate = (num: number, den: number) => (den === 0 ? null : num / den);
+
+/**
+ * ¿Funciona la campaña? Lectura preliminar y observacional con la meta de compra tras exposición.
+ * No es evidencia causal: solo orienta si conviene seguir con la campaña o promover otra estrategia.
+ */
+export function buildVerdict(where: string, presented: number, purchases: number): Verdict {
+  const target = `${Math.round(VERDICT_TARGET_RATE * 100)} %`;
+  if (presented === 0)
+    return {
+      status: "sin_observaciones",
+      message: `Sin observaciones: todavía no se ha presentado la promoción ${where}.`,
+    };
+  if (presented < VERDICT_MIN_PRESENTATIONS)
+    return {
+      status: "en_observacion",
+      message: `Faltan observaciones ${where}: ${presented} de ${VERDICT_MIN_PRESENTATIONS} presentaciones necesarias para una lectura preliminar.`,
+    };
+  const base = `${purchases} de ${presented} clientes que vieron la promoción compraron (meta de la demo: ${target})`;
+  return purchases / presented >= VERDICT_TARGET_RATE
+    ? {
+        status: "funciona",
+        message: `La campaña está funcionando ${where}: ${base}. Es una lectura preliminar con datos ficticios; no demuestra incremento.`,
+      }
+    : {
+        status: "falla",
+        message: `La campaña falló ${where}: solo ${base}. Se debería promover otra estrategia (otra promoción, otro mensaje u otra audiencia) antes de seguir con esta.`,
+      };
+}
+
+/** Veredicto de toda la campaña, sumando las audiencias. */
+export function overallVerdict(rows: ResultRow[]): Verdict {
+  const presented = rows.reduce((n, r) => n + r.presented, 0);
+  const purchases = rows.reduce((n, r) => n + r.purchases, 0);
+  return buildVerdict("en conjunto", presented, purchases);
+}
 
 export function aggregateResults(input: ResultsInput): ResultRow[] {
   const { campaign, segments } = input;
@@ -154,6 +198,7 @@ export function aggregateResults(input: ResultsInput): ResultRow[] {
       presentation_rate: rate(presented, recs.length),
       purchase_rate: rate(purchases, presented),
       contribution_cents: contribution,
+      verdict: buildVerdict(`en ${audienceLabel(audience, segments)}`, presented, purchases),
       evidence,
       evidence_note,
       proposal: buildProposal(campaign, segments, audience),

@@ -15,8 +15,12 @@ import {
   audienceOf,
   basketKey,
   decide,
+  overallVerdict,
   revalidate,
+  applicableItems,
+  type AppliedItem,
   type BasketLine,
+  type Customer,
   type Campaign,
   type Decision,
   type DemoEvent,
@@ -42,7 +46,7 @@ import {
   type ResultsResponse,
 } from "./types";
 
-const STORAGE_KEY = "farmapos:v1";
+const STORAGE_KEY = "farmapos:v2";
 
 type DbState = {
   version: 1;
@@ -138,25 +142,29 @@ function cleanBasket(basket: BasketLine[]): BasketLine[] {
 function toResponse(rec: RecommendationRecord): RecommendResponse {
   const d: Decision = rec.decision;
   const w = d.winner;
+  // Producto principal para el contrato mínimo: el de la factura si lo hay; si no, el primero.
+  const primary = w ? (w.items.find((i) => i.in_basket) ?? w.items[0]) : undefined;
   return {
     recommendation_id: rec.recommendation_id,
     request_id: rec.request_id,
     decision: d.decision,
     campaign_id: rec.campaign_id,
     promotion_id: w?.promotion_id ?? null,
-    sku: w?.sku ?? null,
+    sku: primary?.sku ?? null,
     score: w?.score ?? null,
     score_type: d.score_type,
     reasons: w ? w.reasons : d.no_offer_reason ? [d.no_offer_reason] : [],
     message: d.message,
-    price_before_cents: w?.price_before_cents ?? null,
-    price_after_cents: w?.price_after_cents ?? null,
-    contribution_cents: w?.contribution_cents ?? null,
+    price_before_cents: primary?.price_before_cents ?? null,
+    price_after_cents: primary?.price_after_cents ?? null,
+    contribution_cents: primary?.contribution_cents ?? null,
+    items: w?.items ?? [],
+    family: w?.family ?? null,
     rules_version: d.rules_version,
     campaign_version: rec.campaign_version,
     objective: d.objective,
     promotion_label: w?.label ?? null,
-    product_name: w?.product_name ?? null,
+    product_name: primary?.product_name ?? null,
     ranking: d.ranking,
     discarded: d.discarded,
     no_offer_reason: d.no_offer_reason,
@@ -410,12 +418,31 @@ export function createApi(options: ApiOptions = {}) {
           }
         }
 
+        // Unidades promocionadas: 1 por producto cubierto presente en la factura que siga siendo
+        // elegible (stock y piso) en el momento de confirmar.
+        let applied: AppliedItem[] = [];
+        if (!reason && rec?.decision.winner) {
+          const input = engineInput(state, req.customer_id, basket, now);
+          const promo = input.promotions.find((p) => p.id === rec!.decision.winner!.promotion_id);
+          const eligible = new Set(promo ? applicableItems(input, promo).map((i) => i.sku) : []);
+          applied = rec.decision.winner.items
+            .filter((i) => eligible.has(i.sku) && basket.some((l) => l.sku === i.sku))
+            .map((i) => ({
+              sku: i.sku,
+              product_name: i.product_name,
+              price_before_cents: i.price_before_cents,
+              price_after_cents: i.price_after_cents,
+              contribution_cents: i.contribution_cents,
+            }));
+          if (applied.length === 0) reason = "Ningún producto de la promoción está en la factura.";
+        }
+
         const winner = !reason && rec ? rec.decision.winner : null;
         const subtotal = basket.reduce(
           (sum, l) => sum + l.quantity * (PRODUCTS.find((p) => p.sku === l.sku)?.price_cents ?? 0),
           0,
         );
-        const inBasket = winner ? basket.some((l) => l.sku === winner.sku) : false;
+        const sum = (f: (i: AppliedItem) => number) => applied.reduce((n, i) => n + f(i), 0);
         const transaction: TransactionRecord = {
           transaction_id: req.transaction_id,
           recommendation_id: winner && rec ? rec.recommendation_id : null,
@@ -424,28 +451,21 @@ export function createApi(options: ApiOptions = {}) {
           basket,
           promotion_applied: winner !== null,
           promotion_id: winner?.promotion_id ?? null,
-          sku: winner?.sku ?? null,
-          revenue_cents: winner?.price_after_cents ?? 0,
-          cost_cents: winner ? winner.price_after_cents - winner.contribution_cents : 0,
-          contribution_cents: winner?.contribution_cents ?? 0,
+          applied: winner ? applied : [],
+          revenue_cents: winner ? sum((i) => i.price_after_cents) : 0,
+          cost_cents: winner ? sum((i) => i.price_after_cents - i.contribution_cents) : 0,
+          contribution_cents: winner ? sum((i) => i.contribution_cents) : 0,
           total_cents: winner
-            ? subtotal +
-              (inBasket
-                ? winner.price_after_cents - winner.price_before_cents
-                : winner.price_after_cents)
+            ? subtotal - sum((i) => i.price_before_cents - i.price_after_cents)
             : subtotal,
-          added_unit: winner !== null && !inBasket,
           reason,
           at: now.toISOString(),
         };
         state.transactions.push(transaction);
 
-        // Stock: se descuentan las líneas de la canasta (+1 si se agregó la unidad promocionada).
+        // Stock: se descuentan las líneas de la factura.
         for (const l of basket) {
           state.stock[l.sku] = Math.max(0, (state.stock[l.sku] ?? 0) - l.quantity);
-        }
-        if (transaction.added_unit && winner) {
-          state.stock[winner.sku] = Math.max(0, (state.stock[winner.sku] ?? 0) - 1);
         }
 
         let event: DemoEvent | null = null;
@@ -500,11 +520,73 @@ export function createApi(options: ApiOptions = {}) {
       return {
         generated_at: clock().toISOString(),
         rows,
+        overall: overallVerdict(rows),
         events: [...state.events].reverse(),
         transactions: [...state.transactions].reverse(),
         notices,
         persistent,
       };
+    },
+
+    /** Busca un cliente por la cédula FICTICIA de demostración. */
+    async lookupCustomer(cedula: string): Promise<Customer> {
+      await delay();
+      const digits = cedula.replace(/\D/g, "");
+      const customer = CUSTOMERS.find((c) => c.cedula === digits);
+      if (!customer)
+        throw new ApiError(
+          "NOT_FOUND",
+          "Cédula no registrada en la demostración. Use una de las cédulas de ejemplo.",
+        );
+      return customer;
+    },
+
+    /**
+     * Genera ventas de ejemplo (9: 3 por audiencia) pasando por las mismas reglas que el POS, para mostrar en
+     * resultados una campaña que funciona o que falla. Los datos siguen siendo ficticios.
+     */
+    async seedScenario(kind: "funciona" | "falla"): Promise<number> {
+      await delay();
+      const inner = createApi({ storage, delay: async () => {}, now: clock });
+      const sales = [
+        { customer: "c-rosa", sku: "sku-locion" },
+        { customer: "c-luis", sku: "sku-desodorante" },
+        { customer: "c-ana", sku: "sku-gel" },
+      ];
+      let n = 0;
+      for (let round = 0; round < 3; round++) {
+        for (const sale of sales) {
+          n += 1;
+          const tag = `seed-${kind}-${Date.now().toString(36)}-${n}`;
+          const basket = [{ sku: sale.sku, quantity: 1 }];
+          const rec = await inner.recommend({
+            request_id: `req-${tag}`,
+            customer_id: sale.customer,
+            store_id: STORE.id,
+            campaign_id: CAMPAIGN.id,
+            basket,
+          });
+          if (rec.decision !== "offer") continue;
+          await inner.registerEvent({
+            event_id: `evt-${tag}-p`,
+            recommendation_id: rec.recommendation_id,
+            type: "presented",
+          });
+          await inner.registerEvent({
+            event_id: `evt-${tag}-r`,
+            recommendation_id: rec.recommendation_id,
+            type: kind === "funciona" ? "accepted" : "declined",
+          });
+          await inner.confirmTransaction({
+            transaction_id: `tx-${tag}`,
+            customer_id: sale.customer,
+            store_id: STORE.id,
+            basket,
+            recommendation_id: rec.recommendation_id,
+          });
+        }
+      }
+      return n;
     },
 
     // --- Administración de la demo (fuera del contrato de la sección 7) ---

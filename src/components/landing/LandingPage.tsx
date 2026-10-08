@@ -356,9 +356,9 @@ export function LandingPage() {
                 Pruébelo con <span className="hl">Rosa, Luis y Ana</span>
               </h2>
               <p className="lead">
-                Todo ocurre en su navegador y con datos ficticios. Siga el «Recorrido de demo» al
-                final del panel o cambie la configuración de Comercial para ver cómo cambia la
-                acción.
+                Todo ocurre en su navegador y con datos ficticios. Siga el «Recorrido de demo»:
+                ingrese la cédula de demostración, agregue productos a la factura y finalice la
+                venta para ver la promoción sugerida.
               </p>
             </div>
             <div

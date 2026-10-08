@@ -5,27 +5,37 @@ export type PromotionStatus = "approved" | "not_approved" | "expired";
 export type CampaignStatus = "approved" | "not_approved";
 
 export type Segment = { id: string; name: string };
+/** Familia de la demo: orienta cada producto a uno de los tres casos de demostración. */
+export type Family = "wellness" | "practicos" | "membresia";
 export type Product = {
   sku: string;
   name: string;
+  brand: string;
   category: string;
+  family: Family;
   price_cents: number;
   cost_cents: number;
 };
 export type Customer = {
   id: string;
+  /** Cédula FICTICIA de demostración (nunca una cédula real). No se usa como clave interna. */
+  cedula: string;
   name: string;
+  /** Familia de productos que la demo exige agregar para este caso. */
+  required_family: Family;
   /** Afinidad por segmento (0–1). Vacío = afinidad desconocida. */
   affinities: Record<string, number>;
   affinity_source: string;
   affinity_date: string;
   membership_active: boolean;
 };
+export type PromotionItem = { sku: string; promo_price_cents: number };
 export type Promotion = {
   id: string;
   label: string;
-  sku: string;
-  promo_price_cents: number;
+  family: Family;
+  /** Productos cubiertos y su precio promocional (el precio final ya incluye el descuento). */
+  items: PromotionItem[];
   status: PromotionStatus;
   valid_from: string;
   valid_until: string;
@@ -87,23 +97,31 @@ export type DiscardCode =
 export type Discard = {
   promotion_id: string;
   label: string;
-  sku: string;
   code: DiscardCode;
   reason: string;
+};
+
+export type RankedItem = {
+  sku: string;
+  product_name: string;
+  price_before_cents: number;
+  price_after_cents: number;
+  contribution_cents: number;
+  in_basket: boolean;
 };
 
 export type Ranked = {
   promotion_id: string;
   label: string;
-  sku: string;
-  product_name: string;
+  family: Family;
   score: number;
   affinity_pct: number;
   relevance_pct: number;
   priority_pct: number;
-  price_before_cents: number;
-  price_after_cents: number;
+  /** Mayor contribución por unidad entre los productos aplicables (criterio de desempate). */
   contribution_cents: number;
+  /** Productos donde la promoción puede aplicarse (pasan stock y piso). */
+  items: RankedItem[];
   reasons: string[];
 };
 
@@ -150,6 +168,14 @@ export type RecommendationRecord = {
   decision: Decision;
 };
 
+export type AppliedItem = {
+  sku: string;
+  product_name: string;
+  price_before_cents: number;
+  price_after_cents: number;
+  contribution_cents: number;
+};
+
 export type TransactionRecord = {
   transaction_id: string;
   recommendation_id: string | null;
@@ -158,14 +184,13 @@ export type TransactionRecord = {
   basket: BasketLine[];
   promotion_applied: boolean;
   promotion_id: string | null;
-  sku: string | null;
-  /** Ingreso y contribución de la unidad promocionada (el resto de la canasta no se modela). */
+  /** Unidades promocionadas (1 por producto cubierto presente en la factura). */
+  applied: AppliedItem[];
+  /** Ingreso, costo y contribución de las unidades promocionadas (el resto de la factura no se modela). */
   revenue_cents: number;
   cost_cents: number;
   contribution_cents: number;
   total_cents: number;
-  /** true si la compra incluyó 1 unidad adicional del producto promocionado (no estaba en la canasta). */
-  added_unit: boolean;
   reason: string | null;
   at: string;
 };

@@ -6,6 +6,7 @@ import {
   ApiError,
   type BasketLine,
   type ConfirmTransactionResponse,
+  type Customer,
   type DemoData,
   type Objective,
   type PromotionStatus,
@@ -28,26 +29,33 @@ const initialStatus: RecommendationStatus = {
   purchased: false,
   superseded: false,
 };
-const basketSignature = (basket: BasketLine[]) =>
+const basketKey = (basket: BasketLine[]) =>
   basket
     .filter((l) => l.quantity > 0)
     .map((l) => `${l.sku}:${l.quantity}`)
+    .sort()
     .join("|");
 
 const messageOf = (e: unknown) =>
   e instanceof ApiError ? e.message : "Ocurrió un error inesperado. Intente de nuevo.";
 
-/** Estado y acciones del POS. Todo el acceso a datos pasa por `@/api`. */
+/**
+ * Estado y acciones del POS. Flujo: cédula → factura (productos) → «Finalizar venta» →
+ * ventana con la recomendación → compra. Todo el acceso a datos pasa por `@/api`.
+ */
 export function usePosDemo() {
   const [data, setData] = useState<DemoData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [customerId, setCustomerId] = useState("c-rosa");
+  const [customer, setCustomer] = useState<Customer | null>(null);
+  const [cedulaDraft, setCedulaDraft] = useState("");
+  const [lookupError, setLookupError] = useState<string | null>(null);
   const [basket, setBasket] = useState<BasketLine[]>([]);
   const [card, setCard] = useState<CardState>({ status: "idle" });
+  const [cardKey, setCardKey] = useState("");
   const [status, setStatus] = useState<RecommendationStatus>(initialStatus);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [completed, setCompleted] = useState<ConfirmTransactionResponse | null>(null);
-  const [nonce, setNonce] = useState(0);
   const dataRef = useRef<DemoData | null>(null);
   dataRef.current = data;
 
@@ -62,62 +70,30 @@ export function usePosDemo() {
     let cancelled = false;
     api
       .getDemoData()
-      .then((d) => {
-        if (cancelled) return;
-        setData(d);
-        setBasket(d.initial_basket);
-      })
+      .then((d) => !cancelled && setData(d))
       .catch(() => !cancelled && setLoadError("No se pudieron cargar los datos de la demo."));
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Una canasta, cliente o configuración nueva genera una nueva decisión.
-  const signature = data
-    ? [
-        customerId,
-        basketSignature(basket),
-        JSON.stringify(data.config),
-        JSON.stringify(data.stock),
-        data.failure_mode,
-        nonce,
-      ].join("§")
-    : null;
-
-  useEffect(() => {
-    const current = dataRef.current;
-    if (!signature || !current || completed) return;
-    let cancelled = false;
-    setCard({ status: "loading" });
+  const invalidate = useCallback(() => {
+    setCard({ status: "idle" });
     setStatus(initialStatus);
-    const timer = setTimeout(() => {
-      api
-        .recommend({
-          request_id: uid("req"),
-          customer_id: customerId,
-          store_id: current.store.id,
-          campaign_id: current.campaign.id,
-          basket,
-        })
-        .then(async (rec) => {
-          if (cancelled) return;
-          setCard({ status: "ready", rec });
-          setStatus(initialStatus);
-          await sync();
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          setCard({ status: "error", message: messageOf(e) });
-        });
-    }, 150);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // `signature` resume cliente, canasta, configuración, stock y modo fallo.
+    setDialogOpen(false);
+  }, []);
+
+  // Si Comercial cambia la configuración, el stock o el modo de fallo, la recomendación previa
+  // deja de ser válida: se calculará una nueva al finalizar la venta.
+  const conditions = data ? JSON.stringify([data.config, data.stock, data.failure_mode]) : null;
+  const lastConditions = useRef<string | null>(null);
+  useEffect(() => {
+    if (conditions === lastConditions.current) return;
+    const first = lastConditions.current === null;
+    lastConditions.current = conditions;
+    if (!first && !completed) invalidate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature, completed]);
+  }, [conditions]);
 
   const guarded = useCallback(async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -129,6 +105,96 @@ export function usePosDemo() {
       setBusy(false);
     }
   }, []);
+
+  // ---- Cliente ----
+  const lookup = useCallback(async (cedula: string) => {
+    setBusy(true);
+    setLookupError(null);
+    try {
+      const found = await api.lookupCustomer(cedula);
+      setCustomer(found);
+      setBasket([]);
+      setCompleted(null);
+      setCard({ status: "idle" });
+      setStatus(initialStatus);
+      setDialogOpen(false);
+    } catch (e) {
+      setLookupError(messageOf(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const newSale = useCallback(() => {
+    setCustomer(null);
+    setCedulaDraft("");
+    setLookupError(null);
+    setBasket([]);
+    setCompleted(null);
+    invalidate();
+  }, [invalidate]);
+
+  /** Atajo del recorrido: carga la cédula de demostración y busca al cliente. */
+  const startCase = useCallback(
+    async (cedula: string) => {
+      newSale();
+      setCedulaDraft(cedula);
+      await lookup(cedula);
+    },
+    [lookup, newSale],
+  );
+
+  // ---- Factura ----
+  const setQuantity = useCallback(
+    (sku: string, quantity: number) => {
+      setBasket((prev) => {
+        const q = Math.max(0, Math.min(9, quantity));
+        const others = prev.filter((l) => l.sku !== sku);
+        return q > 0 ? [...others, { sku, quantity: q }] : others;
+      });
+      // Una factura modificada genera una nueva decisión.
+      invalidate();
+    },
+    [invalidate],
+  );
+
+  const requiredFamilyInBasket = Boolean(
+    customer &&
+    data &&
+    basket.some(
+      (l) =>
+        l.quantity > 0 &&
+        data.products.find((p) => p.sku === l.sku)?.family === customer.required_family,
+    ),
+  );
+
+  // ---- Recomendación y compra ----
+  const finalize = useCallback(async () => {
+    const current = dataRef.current;
+    if (!customer || !current) return;
+    setDialogOpen(true);
+    const key = basketKey(basket);
+    if (card.status === "ready" && cardKey === key && !completed) return;
+    setBusy(true);
+    setCard({ status: "loading" });
+    setStatus(initialStatus);
+    try {
+      const rec = await api.recommend({
+        request_id: uid("req"),
+        customer_id: customer.id,
+        store_id: current.store.id,
+        campaign_id: current.campaign.id,
+        basket,
+      });
+      setCard({ status: "ready", rec });
+      setCardKey(key);
+      await sync();
+    } catch (e) {
+      setCard({ status: "error", message: messageOf(e) });
+    } finally {
+      setBusy(false);
+    }
+  }, [basket, card, cardKey, completed, customer, sync]);
 
   const respond = useCallback(
     (type: ResponseEventType) =>
@@ -149,11 +215,11 @@ export function usePosDemo() {
     () =>
       guarded(async () => {
         const current = dataRef.current;
-        if (!current) return;
+        if (!current || !customer) return;
         const rec = card.status === "ready" ? card.rec : null;
         const res = await api.confirmTransaction({
           transaction_id: uid("tx"),
-          customer_id: customerId,
+          customer_id: customer.id,
           store_id: current.store.id,
           basket,
           recommendation_id: rec && rec.decision === "offer" ? rec.recommendation_id : null,
@@ -161,35 +227,18 @@ export function usePosDemo() {
         setCompleted(res);
         await sync();
       }),
-    [basket, card, customerId, guarded, sync],
+    [basket, card, customer, guarded, sync],
   );
-
-  const setQuantity = useCallback((sku: string, quantity: number) => {
-    setBasket((prev) => {
-      const q = Math.max(0, Math.min(9, quantity));
-      const others = prev.filter((l) => l.sku !== sku);
-      return q > 0 ? [...others, { sku, quantity: q }] : others;
-    });
-  }, []);
-
-  const newPurchase = useCallback(() => {
-    setCompleted(null);
-    setBasket(dataRef.current?.initial_basket ?? []);
-    setNonce((n) => n + 1);
-  }, []);
 
   const reset = useCallback(
     () =>
       guarded(async () => {
         await api.resetDemo();
-        const fresh = await sync();
-        setCompleted(null);
-        setCustomerId("c-rosa");
-        setBasket(fresh.initial_basket);
-        setNonce((n) => n + 1);
+        await sync();
+        newSale();
         toast.success("Demo reiniciada: datos, stock y eventos restaurados.");
       }),
-    [guarded, sync],
+    [guarded, newSale, sync],
   );
 
   const admin = useMemo(
@@ -209,9 +258,9 @@ export function usePosDemo() {
           await api.updateConfig({ promo_status: { [promotionId]: promoStatus } });
           await sync();
         }),
-      setStock: (sku: string, quantity: number) =>
+      setStock: (skus: string[], quantity: number) =>
         guarded(async () => {
-          await api.setStock(sku, quantity);
+          for (const sku of skus) await api.setStock(sku, quantity);
           await sync();
         }),
       setFailure: (on: boolean) =>
@@ -226,25 +275,29 @@ export function usePosDemo() {
   return {
     data,
     loadError,
-    customerId,
-    setCustomerId: (id: string) => {
-      setCompleted(null);
-      setCustomerId(id);
-    },
+    customer,
+    cedulaDraft,
+    setCedulaDraft,
+    lookupError,
+    lookup,
+    startCase,
+    newSale,
     basket,
     setQuantity,
+    requiredFamilyInBasket,
     card,
     status,
+    dialogOpen,
+    setDialogOpen,
     busy,
     completed,
+    finalize,
     present: () => respond("presented"),
     skip: () => respond("not_presented"),
     accept: () => respond("accepted"),
     decline: () => respond("declined"),
     confirm,
-    newPurchase,
     reset,
-    retry: () => setNonce((n) => n + 1),
     admin,
   };
 }
